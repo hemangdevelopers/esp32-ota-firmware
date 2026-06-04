@@ -5,6 +5,7 @@
 #include <ArduinoOTA.h>
 #include <HTTPClient.h>
 #include <HTTPUpdate.h>
+#include <ArduinoJson.h>
 
 #include "mbedtls/aes.h"
 #include "mbedtls/base64.h"
