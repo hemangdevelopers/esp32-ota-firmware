@@ -1,5 +1,8 @@
 name: ESP32 Firmware Build & OTA Release
 
+permissions:
+  contents: write
+  
 on:
   push:
     branches: [ "main" ]
