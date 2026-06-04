@@ -1,4 +1,4 @@
-name: ESP32 Build & Release
+name: ESP32 Firmware Build & OTA Release
 
 on:
   push:
@@ -9,29 +9,62 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+      # 1. Get repository code
       - name: Checkout code
         uses: actions/checkout@v4
 
+      # 2. Setup Python (needed for PlatformIO)
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
+      # 3. Install PlatformIO
       - name: Install PlatformIO
         run: pip install platformio
 
-      - name: Build firmware
+      # 4. Read firmware version
+      - name: Read version
+        id: version
+        run: |
+          if [ -f version.txt ]; then
+            VERSION=$(cat version.txt)
+          else
+            VERSION="0.0.1"
+          fi
+          echo "VERSION=$VERSION" >> $GITHUB_OUTPUT
+
+      # 5. Build firmware
+      - name: Build ESP32 firmware
         run: pio run
 
-      - name: Copy firmware
+      # 6. Verify build success
+      - name: Verify build output
         run: |
-          mkdir output
+          test -f .pio/build/esp32dev/firmware.bin || (echo "BUILD FAILED" && exit 1)
+          echo "BUILD SUCCESS"
+
+      # 7. Prepare output
+      - name: Prepare firmware file
+        run: |
+          mkdir -p output
           cp .pio/build/esp32dev/firmware.bin output/firmware.bin
 
+      # 8. Create GitHub Release (OTA source)
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v${{ github.run_number }}
+          tag_name: v${{ steps.version.outputs.VERSION }}
+          name: ESP32 Firmware v${{ steps.version.outputs.VERSION }}
           files: output/firmware.bin
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # 9. Build success message (for logs/debugging)
+      - name: Build Status
+        run: |
+          echo "================================"
+          echo "BUILD SUCCESSFUL"
+          echo "Version: ${{ steps.version.outputs.VERSION }}"
+          echo "Firmware generated and released"
+          echo "================================"
