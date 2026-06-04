@@ -10,7 +10,7 @@
 #include "mbedtls/aes.h"
 #include "mbedtls/base64.h"
 
-#define FW_VERSION "5.0"
+#define FW_VERSION "1.0.4"
 
 // ---------------- WiFi ----------------
 const char* ssid = "Hemang's S23 FE";
@@ -239,7 +239,34 @@ void callback(char* topic, byte* payload, unsigned int length)
 
   if(String(topic) == "home/esp32/update")
   {
-    doOTA(msg);
+      DynamicJsonDocument doc(512);
+
+      DeserializationError err =
+          deserializeJson(doc, msg);
+
+      if(err)
+      {
+          Serial.println("Invalid OTA JSON");
+          return;
+      }
+
+      String newVersion = doc["version"];
+      String otaUrl     = doc["url"];
+
+      Serial.print("Current Version: ");
+      Serial.println(FW_VERSION);
+
+      Serial.print("Available Version: ");
+      Serial.println(newVersion);
+
+      if(newVersion == FW_VERSION)
+      {
+          Serial.println("Already up to date");
+          return;
+      }
+
+      Serial.println("New firmware detected");
+      doOTA(otaUrl);
   }
 }
 
