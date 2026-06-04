@@ -9,7 +9,7 @@
 #include "mbedtls/aes.h"
 #include "mbedtls/base64.h"
 
-#define FW_VERSION "4.0"
+#define FW_VERSION "5.0"
 
 // ---------------- WiFi ----------------
 const char* ssid = "Hemang's S23 FE";
