@@ -2,31 +2,32 @@ name: ESP32 Firmware Build & OTA Release
 
 permissions:
   contents: write
-  
+
 on:
   push:
-    branches: [ "main" ]
+    branches:
+      - main
 
 jobs:
   build:
     runs-on: ubuntu-latest
 
     steps:
-      # 1. Get repository code
+      # Checkout repository
       - name: Checkout code
         uses: actions/checkout@v4
 
-      # 2. Setup Python (needed for PlatformIO)
+      # Python
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
-      # 3. Install PlatformIO
+      # PlatformIO
       - name: Install PlatformIO
         run: pip install platformio
 
-      # 4. Read firmware version
+      # Read version.txt
       - name: Read version
         id: version
         run: |
@@ -37,27 +38,34 @@ jobs:
           fi
 
           echo "VERSION=$VERSION" >> $GITHUB_OUTPUT
-          echo "FW_VERSION=$VERSION" >> $GITHUB_ENV
 
-      # 5. Build firmware
+      # Generate version.h automatically
+      - name: Generate version header
+        run: |
+          echo '#ifndef FW_VERSION' > src/version.h
+          echo "#define FW_VERSION \"${{ steps.version.outputs.VERSION }}\"" >> src/version.h
+          echo '#endif' >> src/version.h
+
+          echo "Generated version.h:"
+          cat src/version.h
+
+      # Build firmware
       - name: Build ESP32 firmware
-        env:
-          FW_VERSION: ${{ env.FW_VERSION }}
         run: pio run
 
-      # 6. Verify build success
+      # Verify build
       - name: Verify build output
         run: |
           test -f .pio/build/esp32dev/firmware.bin || (echo "BUILD FAILED" && exit 1)
           echo "BUILD SUCCESS"
 
-      # 7. Prepare output
+      # Prepare firmware
       - name: Prepare firmware file
         run: |
           mkdir -p output
           cp .pio/build/esp32dev/firmware.bin output/firmware.bin
 
-      # 8. Create GitHub Release (OTA source)
+      # Create/Update Release
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
@@ -67,7 +75,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      # 9. Build success message (for logs/debugging)
+      # Status
       - name: Build Status
         run: |
           echo "================================"
