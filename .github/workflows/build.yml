@@ -41,6 +41,8 @@ jobs:
 
       # 5. Build firmware
       - name: Build ESP32 firmware
+        env:
+          FW_VERSION: ${{ env.FW_VERSION }}
         run: pio run
 
       # 6. Verify build success
@@ -59,8 +61,8 @@ jobs:
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v${{ steps.version.outputs.VERSION }}
-          name: ESP32 Firmware v${{ steps.version.outputs.VERSION }}
+          tag_name: ${{ steps.version.outputs.VERSION }}
+          name: ESP32 Firmware ${{ steps.version.outputs.VERSION }}
           files: output/firmware.bin
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
