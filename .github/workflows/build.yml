@@ -35,7 +35,9 @@ jobs:
           else
             VERSION="0.0.1"
           fi
+
           echo "VERSION=$VERSION" >> $GITHUB_OUTPUT
+          echo "FW_VERSION=$VERSION" >> $GITHUB_ENV
 
       # 5. Build firmware
       - name: Build ESP32 firmware
