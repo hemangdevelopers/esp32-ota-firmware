@@ -6,23 +6,13 @@
 #include <HTTPClient.h>
 #include <HTTPUpdate.h>
 #include <ArduinoJson.h>
+#include <WiFiManager.h>
+#include <Preferences.h>
 
 #include "mbedtls/aes.h"
 #include "mbedtls/base64.h"
 
 #include "version.h"
-
-// ---------------- WiFi ----------------
-const char* ssid = "Hemang's S23 FE";
-const char* password = "hemang123";
-
-// ---------------- MQTT ----------------
-const char* mqtt_server = "1f29758fe6fe4b919f1d6b308790f9d8.s1.eu.hivemq.cloud";
-const int mqtt_port = 8883;
-
-// ---------------- MQTT Credentials ----------------
-const char* mqtt_user = "esp32";
-const char* mqtt_pass = "Esp@12345";
 
 // ---------------- DHT11 ----------------
 #define DHTPIN 4
@@ -85,6 +75,12 @@ emyPxgcYxn/eR44/KJ4EBs+lVDR3veyJm+kXQ99b21/+jh5Xos1AnX5iItreGCc=
 WiFiClientSecure secureClient;
 PubSubClient client(secureClient);
 HTTPClient https;
+Preferences prefs;
+
+String mqttServer;
+String mqttUser;
+String mqttPass;
+int mqttPort = 8883;
 
 // --------------------------------------------------
 // AES-CBC + Base64
@@ -171,8 +167,8 @@ void reconnect()
 
   if (client.connect(
         clientId.c_str(),
-        mqtt_user,
-        mqtt_pass))
+        mqttUser.c_str(),
+        mqttPass.c_str()))
   {
     Serial.println("connected");
 
@@ -270,6 +266,85 @@ void callback(char* topic, byte* payload, unsigned int length)
   }
 }
 
+void setupConfigPortal()
+{
+    prefs.begin("config", true);
+
+    String savedServer =
+        prefs.getString("mqtt_server", "");
+
+    String savedUser =
+        prefs.getString("mqtt_user", "");
+
+    String savedPass =
+        prefs.getString("mqtt_pass", "");
+
+    prefs.end();
+
+    WiFiManager wm;
+
+    WiFiManagerParameter custom_mqtt_server(
+        "server",
+        "MQTT Server",
+        savedServer.c_str(),
+        100
+    );
+
+    WiFiManagerParameter custom_mqtt_user(
+        "user",
+        "MQTT Username",
+        savedUser.c_str(),
+        50
+    );
+
+    WiFiManagerParameter custom_mqtt_pass(
+        "pass",
+        "MQTT Password",
+        savedPass.c_str(),
+        50
+    );
+
+    wm.addParameter(&custom_mqtt_server);
+    wm.addParameter(&custom_mqtt_user);
+    wm.addParameter(&custom_mqtt_pass);
+
+    bool connected =
+        wm.autoConnect("ESP32_Config");
+
+    if(!connected)
+    {
+        ESP.restart();
+    }
+
+    mqttServer =
+        String(custom_mqtt_server.getValue());
+
+    mqttUser =
+        String(custom_mqtt_user.getValue());
+
+    mqttPass =
+        String(custom_mqtt_pass.getValue());
+
+    prefs.begin("config", false);
+
+    prefs.putString(
+        "mqtt_server",
+        mqttServer
+    );
+
+    prefs.putString(
+        "mqtt_user",
+        mqttUser
+    );
+
+    prefs.putString(
+        "mqtt_pass",
+        mqttPass
+    );
+
+    prefs.end();
+}
+
 // --------------------------------------------------
 // Setup
 // --------------------------------------------------
@@ -279,13 +354,7 @@ void setup()
 
   dht.begin();
 
-  WiFi.begin(ssid, password);
-
-  while (WiFi.status() != WL_CONNECTED)
-  {
-    delay(500);
-    Serial.print(".");
-  }
+  setupConfigPortal();
 
   Serial.println("\nWiFi connected");
 
@@ -333,8 +402,8 @@ void setup()
   secureClient.setCACert(ca_cert);
   
   client.setServer(
-    mqtt_server,
-    mqtt_port
+    mqttServer.c_str(),
+    mqttPort
   );
   client.setCallback(callback);
 }
@@ -393,4 +462,3 @@ void loop()
     delay(50);
   }
 }
-
