@@ -14,6 +14,15 @@
 
 #include "version.h"
 
+TaskHandle_t mqttTaskHandle = NULL;
+TaskHandle_t sensorTaskHandle = NULL;
+TaskHandle_t otaTaskHandle = NULL;
+TaskHandle_t wifiTaskHandle = NULL;
+
+SemaphoreHandle_t mqttMutex;
+
+unsigned long lastReconnectAttempt = 0;
+
 // ---------------- DHT11 ----------------
 #define DHTPIN 4
 #define DHTTYPE DHT11
@@ -81,6 +90,9 @@ String mqttServer;
 String mqttUser;
 String mqttPass;
 int mqttPort = 8883;
+
+volatile bool otaRequested = false;
+String pendingOTAUrl = "";
 
 // --------------------------------------------------
 // AES-CBC + Base64
@@ -150,37 +162,6 @@ String encryptAES(String plainText)
   }
 
   return ivHex + ":" + cipherText;
-}
-
-// --------------------------------------------------
-// MQTT Reconnect
-// --------------------------------------------------
-void reconnect()
-{
-  if (client.connected()) return;
-
-  Serial.print("Connecting MQTT...");
-
-  String clientId =
-    "ESP32_" +
-    String((uint32_t)ESP.getEfuseMac(), HEX);
-
-  if (client.connect(
-        clientId.c_str(),
-        mqttUser.c_str(),
-        mqttPass.c_str()))
-  {
-    Serial.println("connected");
-
-    client.subscribe("home/esp32/update");
-
-    Serial.println("Subscribed to OTA topic");
-  }
-  else
-  {
-    Serial.print("failed rc=");
-    Serial.println(client.state());
-  }
 }
 
 void callback(char* topic, byte* payload, unsigned int length);
@@ -262,7 +243,9 @@ void callback(char* topic, byte* payload, unsigned int length)
       }
 
       Serial.println("New firmware detected");
-      doOTA(otaUrl);
+
+      pendingOTAUrl = otaUrl;
+      otaRequested = true;
   }
 }
 
@@ -345,6 +328,198 @@ void setupConfigPortal()
     prefs.end();
 }
 
+void mqttTask(void *pvParameters)
+{
+    while(true)
+    {
+        if(xSemaphoreTake(
+                mqttMutex,
+                pdMS_TO_TICKS(100)))
+        {
+            if(!client.connected())
+            {
+                if(millis() - lastReconnectAttempt < 5000)
+                {
+                    xSemaphoreGive(mqttMutex);
+             
+                    vTaskDelay(pdMS_TO_TICKS(100));
+
+                    continue;
+                }
+                
+                lastReconnectAttempt = millis();
+
+                Serial.print(
+                    "Connecting MQTT..."
+                );
+
+                String clientId =
+                    "ESP32_" +
+                    String(
+                        (uint32_t)ESP.getEfuseMac(),
+                        HEX
+                    );
+
+                if(client.connect(
+                        clientId.c_str(),
+                        mqttUser.c_str(),
+                        mqttPass.c_str()))
+                {
+                    Serial.println(
+                        "connected"
+                    );
+
+                    client.subscribe(
+                        "home/esp32/update"
+                    );
+
+                    Serial.println(
+                        "Subscribed to OTA topic"
+                    );
+                }
+                else
+                {
+                    Serial.print(
+                        "failed rc="
+                    );
+
+                    Serial.println(
+                        client.state()
+                    );
+                }
+            }
+
+            client.loop();
+
+            xSemaphoreGive(
+                mqttMutex
+            );
+        }
+
+        vTaskDelay(
+            pdMS_TO_TICKS(50)
+        );
+    }
+}
+
+void otaTask(void *pvParameters)
+{
+    while(true)
+    {
+        ArduinoOTA.handle();
+
+        if(otaRequested)
+        {
+            otaRequested = false;
+
+            Serial.println(
+                "Starting OTA..."
+            );
+
+            doOTA(
+                pendingOTAUrl
+            );
+        }
+
+        vTaskDelay(pdMS_TO_TICKS(10));
+    }
+}
+
+void sensorTask(void *pvParameters)
+{
+    while(true)
+    {
+        float temp =
+            dht.readTemperature();
+
+        float hum =
+            dht.readHumidity();
+
+        if(!isnan(temp) && !isnan(hum))
+        {
+            String json =
+                "{\"temp\":" +
+                String(temp,1) +
+                ",\"hum\":" +
+                String(hum,1) +
+                "}";
+
+            String encrypted =
+                encryptAES(json);
+
+            if(xSemaphoreTake(
+                    mqttMutex,
+                    pdMS_TO_TICKS(1000)))
+            {
+                if(client.connected())
+                {
+                    client.publish(
+                        "home/esp32/encrypted",
+                        encrypted.c_str()
+                    );
+                }
+                xSemaphoreGive(mqttMutex);
+            }
+
+            Serial.println("Plain:");
+            Serial.println(json);
+
+            Serial.println("Encrypted:");
+            Serial.println(encrypted);
+        }
+        else
+        {
+            Serial.println(
+                "DHT11 read failed"
+            );
+        }
+
+        vTaskDelay(
+            pdMS_TO_TICKS(5000)
+        );
+    }
+}
+
+void wifiTask(void *pvParameters)
+{
+    while(true)
+    {
+        if(WiFi.status() != WL_CONNECTED)
+        {
+            Serial.println(
+                "WiFi lost. Reconnecting..."
+            );
+
+            WiFi.reconnect();
+
+            int retries = 0;
+
+            while(
+                WiFi.status() != WL_CONNECTED &&
+                retries < 20)
+            {
+                vTaskDelay(
+                    pdMS_TO_TICKS(500)
+                );
+
+                retries++;
+            }
+
+            if(WiFi.status() ==
+                WL_CONNECTED)
+            {
+                Serial.println(
+                    "WiFi restored"
+                );
+            }
+        }
+
+        vTaskDelay(
+            pdMS_TO_TICKS(10000)
+        );
+    }
+}
+
 // --------------------------------------------------
 // Setup
 // --------------------------------------------------
@@ -406,6 +581,59 @@ void setup()
     mqttPort
   );
   client.setCallback(callback);
+
+  mqttMutex = xSemaphoreCreateMutex();
+
+  if(mqttMutex == NULL)
+  {
+      Serial.println(
+          "Mutex creation failed"
+      );
+
+      ESP.restart();
+  }
+
+  xTaskCreatePinnedToCore(
+      mqttTask,
+      "MQTT",
+      4096,
+      NULL,
+      3,
+      &mqttTaskHandle,
+      1
+  );
+
+  xTaskCreatePinnedToCore(
+      sensorTask,
+      "Sensor",
+      6144,
+      NULL,
+      2,
+      &sensorTaskHandle,
+      1
+  );
+
+  xTaskCreatePinnedToCore(
+      otaTask,
+      "OTA",
+      4096,
+      NULL,
+      1,
+      &otaTaskHandle,
+      0
+  );
+
+  xTaskCreatePinnedToCore(
+      wifiTask,
+      "WiFi",
+      4096,
+      NULL,
+      2,
+      &wifiTaskHandle,
+      0
+  );
+
+  Serial.println("All RTOS tasks started");
 }
 
 // --------------------------------------------------
@@ -413,52 +641,7 @@ void setup()
 // --------------------------------------------------
 void loop()
 {
-  ArduinoOTA.handle();
-
-  if (!client.connected())
-  {
-    reconnect();
-  }
-
-  client.loop();
-
-  float temp = dht.readTemperature();
-  float hum  = dht.readHumidity();
-
-  if (isnan(temp) || isnan(hum))
-  {
-    Serial.println("DHT11 read failed");
-    delay(5000);
-    return;
-  }
-
-  String json =
-    "{\"temp\":" +
-    String(temp, 1) +
-    ",\"hum\":" +
-    String(hum, 1) +
-    "}";
-
-  String encrypted =
-    encryptAES(json);
-
-  client.publish(
-    "home/esp32/encrypted",
-    encrypted.c_str()
-  );
-
-  Serial.println("Plain:");
-  Serial.println(json);
-
-  Serial.println("Encrypted:");
-  Serial.println(encrypted);
-
-  unsigned long start = millis();
-
-  while (millis() - start < 5000)
-  {
-    ArduinoOTA.handle();
-    client.loop();
-    delay(50);
-  }
+    vTaskDelay(
+        pdMS_TO_TICKS(1000)
+    );
 }
