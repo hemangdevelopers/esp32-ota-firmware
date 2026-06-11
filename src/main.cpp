@@ -11,6 +11,7 @@
 
 #include "mbedtls/aes.h"
 #include "mbedtls/base64.h"
+#include "mbedtls/md.h"
 
 #include "version.h"
 
@@ -31,12 +32,8 @@ DHT dht(DHTPIN, DHTTYPE);
 
 // ---------------- AES ----------------
 // 16-byte key (AES-128)
-const unsigned char AES_KEY[16] = {
-  '1','2','3','4',
-  '5','6','7','8',
-  '9','0','1','2',
-  '3','4','5','6'
-};
+
+uint8_t AES_KEY[16];
 
 void generateRandomIV(uint8_t *iv)
 {
@@ -85,6 +82,134 @@ WiFiClientSecure secureClient;
 PubSubClient client(secureClient);
 HTTPClient https;
 Preferences prefs;
+
+String bytesToHex(const uint8_t *data, size_t len)
+{
+    String hex = "";
+
+    for(size_t i = 0; i < len; i++)
+    {
+        char buf[3];
+
+        sprintf(buf, "%02X", data[i]);
+
+        hex += buf;
+    }
+
+    return hex;
+}
+
+void hexToBytes(
+    const String &hex,
+    uint8_t *out,
+    size_t outLen)
+{
+    for(size_t i = 0; i < outLen; i++)
+    {
+        sscanf(
+            hex.substring(i * 2, i * 2 + 2).c_str(),
+            "%2hhx",
+            &out[i]
+        );
+    }
+}
+
+void initializeAESKey()
+{
+    prefs.begin("security", false);
+
+    String storedKey =
+        prefs.getString(
+            "aes_key",
+            ""
+        );
+
+    if(storedKey.length() != 32)
+    {
+        uint8_t newKey[16];
+
+        for(int i = 0; i < 16; i++)
+        {
+            newKey[i] =
+                esp_random() & 0xFF;
+        }
+
+        storedKey =
+            bytesToHex(
+                newKey,
+                16
+            );
+
+        prefs.putString(
+            "aes_key",
+            storedKey
+        );
+
+        Serial.println(
+            "New AES key generated"
+        );
+    }
+    else
+    {
+        Serial.println(
+            "AES key loaded from NVS"
+        );
+    }
+
+    hexToBytes(
+        storedKey,
+        AES_KEY,
+        16
+    );
+
+    prefs.end();
+}
+
+String createHMAC(String payload)
+{
+    unsigned char hmac[32];
+
+    mbedtls_md_context_t ctx;
+
+    mbedtls_md_init(&ctx);
+
+    mbedtls_md_setup(
+        &ctx,
+        mbedtls_md_info_from_type(
+            MBEDTLS_MD_SHA256),
+        1
+    );
+
+    mbedtls_md_hmac_starts(
+        &ctx,
+        AES_KEY,
+        16
+    );
+
+    mbedtls_md_hmac_update(
+        &ctx,
+        (unsigned char*)payload.c_str(),
+        payload.length()
+    );
+
+    mbedtls_md_hmac_finish(
+        &ctx,
+        hmac
+    );
+
+    mbedtls_md_free(&ctx);
+
+    String result="";
+
+    for(int i=0;i<32;i++)
+    {
+        char tmp[3];
+        sprintf(tmp,"%02x",hmac[i]);
+        result += tmp;
+    }
+
+    return result;
+}
 
 String mqttServer;
 String mqttUser;
@@ -173,7 +298,8 @@ void doOTA(String url)
   Serial.println(url);
 
   WiFiClientSecure otaClient;
-  otaClient.setInsecure();
+
+  otaClient.setCACert(ca_cert);
 
   httpUpdate.rebootOnUpdate(true);
 
@@ -292,7 +418,10 @@ void setupConfigPortal()
     wm.addParameter(&custom_mqtt_pass);
 
     bool connected =
-        wm.autoConnect("ESP32_Config");
+        wm.autoConnect(
+           "ESP32_Config",
+           "admin"
+        );
 
     if(!connected)
     {
@@ -437,15 +566,25 @@ void sensorTask(void *pvParameters)
 
         if(!isnan(temp) && !isnan(hum))
         {
-            String json =
-                "{\"temp\":" +
-                String(temp,1) +
-                ",\"hum\":" +
-                String(hum,1) +
-                "}";
+            DynamicJsonDocument doc(512);
+
+            doc["temp"]=temp;
+            doc["hum"]=hum;
+            doc["device"]="ESP32_01";
+            doc["timestamp"]=time(nullptr);
+            doc["nonce"] = String(esp_random());
+
+            String payload;
+            serializeJson(doc,payload);
+
+            String hmac = createHMAC(payload);
+
+            doc["hmac"] = hmac;
+
+            serializeJson(doc,payload);
 
             String encrypted =
-                encryptAES(json);
+                encryptAES(payload);
 
             if(xSemaphoreTake(
                     mqttMutex,
@@ -462,7 +601,7 @@ void sensorTask(void *pvParameters)
             }
 
             Serial.println("Plain:");
-            Serial.println(json);
+            Serial.println(payload);
 
             Serial.println("Encrypted:");
             Serial.println(encrypted);
@@ -526,6 +665,20 @@ void wifiTask(void *pvParameters)
 void setup()
 {
   Serial.begin(115200);
+
+  initializeAESKey();
+
+  Serial.print("AES Key: ");
+
+  for(int i = 0; i < 16; i++)
+  {
+      Serial.printf(
+          "%02X",
+          AES_KEY[i]
+      );
+  }
+
+  Serial.println();
 
   dht.begin();
 
