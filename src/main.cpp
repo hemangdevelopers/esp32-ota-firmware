@@ -299,7 +299,7 @@ void doOTA(String url)
 
   WiFiClientSecure otaClient;
 
-  otaClient.setCACert(ca_cert);
+  otaClient.setInsecure();
 
   httpUpdate.rebootOnUpdate(true);
 
