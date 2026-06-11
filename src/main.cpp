@@ -769,7 +769,7 @@ void setup()
   xTaskCreatePinnedToCore(
       otaTask,
       "OTA",
-      4096,
+      12288,
       NULL,
       1,
       &otaTaskHandle,
