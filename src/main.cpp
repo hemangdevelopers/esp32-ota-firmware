@@ -291,6 +291,12 @@ String encryptAES(String plainText)
 
 void callback(char* topic, byte* payload, unsigned int length);
 void doOTA(String url);
+
+Serial.printf(
+    "OTA stack free before update: %u\n",
+    uxTaskGetStackHighWaterMark(NULL)
+);
+
 void doOTA(String url)
 {
   Serial.println("========== OTA UPDATE ==========");
