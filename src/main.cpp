@@ -595,10 +595,18 @@ void sensorTask(void *pvParameters)
             {
                 if(client.connected())
                 {
-                    client.publish(
-                        "home/esp32/encrypted",
-                        encrypted.c_str()
-                    );
+                    Serial.print("MQTT Connected: ");
+                    Serial.println(client.connected());
+                    Serial.print("Encrypted Length = ");
+                    Serial.println(encrypted.length());
+                    bool result =
+                        client.publish(
+                            "home/esp32/encrypted",
+                            encrypted.c_str()
+                        );
+
+                    Serial.print("Publish result = ");
+                    Serial.println(result);
                 }
                 xSemaphoreGive(mqttMutex);
             }
@@ -668,8 +676,11 @@ void wifiTask(void *pvParameters)
 void setup()
 {
   Serial.begin(115200);
+  delay(3000);
 
+  Serial.println("Before AES");
   initializeAESKey();
+  Serial.println("After AES");
 
   Serial.print("AES Key: ");
 
@@ -736,6 +747,9 @@ void setup()
     mqttServer.c_str(),
     mqttPort
   );
+
+  client.setBufferSize(1024);
+
   client.setCallback(callback);
 
   mqttMutex = xSemaphoreCreateMutex();
@@ -752,7 +766,7 @@ void setup()
   xTaskCreatePinnedToCore(
       mqttTask,
       "MQTT",
-      4096,
+      8192,
       NULL,
       3,
       &mqttTaskHandle,
