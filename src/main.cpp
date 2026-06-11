@@ -766,7 +766,7 @@ void setup()
   xTaskCreatePinnedToCore(
       mqttTask,
       "MQTT",
-      8192,
+      16384,
       NULL,
       3,
       &mqttTaskHandle,
