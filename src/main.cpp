@@ -26,6 +26,9 @@ unsigned long lastReconnectAttempt = 0;
 
 int wifiFailureCount = 0;
 
+bool portalRunning = false;
+WiFiManager wm;
+
 // ---------------- DHT11 ----------------
 #define DHTPIN 4
 #define DHTTYPE DHT11
@@ -392,8 +395,6 @@ void setupConfigPortal()
 
     prefs.end();
 
-    WiFiManager wm;
-
     WiFiManagerParameter custom_mqtt_server(
         "server",
         "MQTT Server",
@@ -418,8 +419,6 @@ void setupConfigPortal()
     wm.addParameter(&custom_mqtt_server);
     wm.addParameter(&custom_mqtt_user);
     wm.addParameter(&custom_mqtt_pass);
-
-    wm.setConfigPortalTimeout(0);
   
     bool connected =
         wm.autoConnect(
@@ -429,20 +428,7 @@ void setupConfigPortal()
 
     if(!connected)
     {
-        Serial.println(
-            "Starting Config Portal..."
-        );
-
-        bool portalResult =
-            wm.startConfigPortal(
-                "ESP32_Config",
-                "admin123"
-            );
-
-        if(!portalResult)
-        {
-            return;
-        }
+        return;
     }
 
     mqttServer =
@@ -651,8 +637,24 @@ void wifiTask(void *pvParameters)
 {
     while(true)
     {
+        if(portalRunning)
+        {
+            wm.process();
+        }
+
         if(WiFi.status() == WL_CONNECTED)
         {
+            if(portalRunning)
+            {
+                Serial.println(
+                    "WiFi restored. Closing portal."
+                );
+
+                wm.stopConfigPortal();
+
+                portalRunning = false;
+            }
+
             wifiFailureCount = 0;
         }
         else
@@ -669,6 +671,11 @@ void wifiTask(void *pvParameters)
                 WiFi.status() != WL_CONNECTED &&
                 retries < 20)
             {
+                if(portalRunning)
+                {
+                    wm.process();
+                }
+
                 vTaskDelay(
                     pdMS_TO_TICKS(500)
                 );
@@ -678,10 +685,6 @@ void wifiTask(void *pvParameters)
 
             if(WiFi.status() == WL_CONNECTED)
             {
-                Serial.println(
-                    "WiFi restored"
-                );
-
                 wifiFailureCount = 0;
             }
             else
@@ -696,20 +699,23 @@ void wifiTask(void *pvParameters)
                     wifiFailureCount
                 );
 
-                if(wifiFailureCount >= 6)
+                if(
+                    wifiFailureCount >= 6 &&
+                    !portalRunning
+                )
                 {
                     Serial.println(
-                        "Opening Config Portal..."
+                        "Starting Config Portal..."
                     );
 
-                    WiFiManager wm;
+                    wm.setConfigPortalBlocking(false);
 
                     wm.startConfigPortal(
                         "ESP32_Config",
-                        "admin"
+                        "admin123"
                     );
 
-                    wifiFailureCount = 0;
+                    portalRunning = true;
                 }
             }
         }
