@@ -24,6 +24,8 @@ SemaphoreHandle_t mqttMutex;
 
 unsigned long lastReconnectAttempt = 0;
 
+int wifiFailureCount = 0;
+
 // ---------------- DHT11 ----------------
 #define DHTPIN 4
 #define DHTTYPE DHT11
@@ -417,6 +419,8 @@ void setupConfigPortal()
     wm.addParameter(&custom_mqtt_user);
     wm.addParameter(&custom_mqtt_pass);
 
+    wm.setConfigPortalTimeout(0);
+  
     bool connected =
         wm.autoConnect(
            "ESP32_Config",
@@ -425,7 +429,14 @@ void setupConfigPortal()
 
     if(!connected)
     {
-        ESP.restart();
+        Serial.println(
+            "Starting Config Portal..."
+        );
+
+        wm.startConfigPortal(
+            "ESP32_Config",
+            "admin"
+        );
     }
 
     mqttServer =
@@ -634,7 +645,11 @@ void wifiTask(void *pvParameters)
 {
     while(true)
     {
-        if(WiFi.status() != WL_CONNECTED)
+        if(WiFi.status() == WL_CONNECTED)
+        {
+            wifiFailureCount = 0;
+        }
+        else
         {
             Serial.println(
                 "WiFi lost. Reconnecting..."
@@ -655,12 +670,41 @@ void wifiTask(void *pvParameters)
                 retries++;
             }
 
-            if(WiFi.status() ==
-                WL_CONNECTED)
+            if(WiFi.status() == WL_CONNECTED)
             {
                 Serial.println(
                     "WiFi restored"
                 );
+
+                wifiFailureCount = 0;
+            }
+            else
+            {
+                wifiFailureCount++;
+
+                Serial.print(
+                    "WiFi recovery failed. Count="
+                );
+
+                Serial.println(
+                    wifiFailureCount
+                );
+
+                if(wifiFailureCount >= 6)
+                {
+                    Serial.println(
+                        "Opening Config Portal..."
+                    );
+
+                    WiFiManager wm;
+
+                    wm.startConfigPortal(
+                        "ESP32_Config",
+                        "admin"
+                    );
+
+                    wifiFailureCount = 0;
+                }
             }
         }
 
