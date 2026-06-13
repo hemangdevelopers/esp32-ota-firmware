@@ -424,7 +424,7 @@ void setupConfigPortal()
     bool connected =
         wm.autoConnect(
            "ESP32_Config",
-           "admin"
+           "admin123"
         );
 
     if(!connected)
@@ -433,10 +433,16 @@ void setupConfigPortal()
             "Starting Config Portal..."
         );
 
-        wm.startConfigPortal(
-            "ESP32_Config",
-            "admin"
-        );
+        bool portalResult =
+            wm.startConfigPortal(
+                "ESP32_Config",
+                "admin123"
+            );
+
+        if(!portalResult)
+        {
+            return;
+        }
     }
 
     mqttServer =
@@ -741,6 +747,15 @@ void setup()
   dht.begin();
 
   setupConfigPortal();
+
+  while(WiFi.status() != WL_CONNECTED)
+ {
+      Serial.println(
+          "Waiting for WiFi..."
+      );
+
+      delay(1000);
+  }
 
   Serial.println("\nWiFi connected");
 
