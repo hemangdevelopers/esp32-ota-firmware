@@ -9,6 +9,7 @@
 #include <WiFiManager.h>
 #include <Preferences.h>
 
+#include "esp_wifi.h"
 #include "mbedtls/aes.h"
 #include "mbedtls/base64.h"
 #include "mbedtls/md.h"
@@ -90,6 +91,34 @@ WiFiClientSecure secureClient;
 PubSubClient client(secureClient);
 HTTPClient https;
 Preferences prefs;
+
+void loadSavedWifiCredentials()
+{
+    wifi_config_t conf;
+
+    esp_wifi_get_config(
+        WIFI_IF_STA,
+        &conf
+    );
+
+    savedSSID =
+        String(
+            (char*)conf.sta.ssid
+        );
+
+    savedPassword =
+        String(
+            (char*)conf.sta.password
+        );
+
+    Serial.print(
+        "Stored SSID: "
+    );
+
+    Serial.println(
+        savedSSID
+    );
+}
 
 String bytesToHex(const uint8_t *data, size_t len)
 {
@@ -423,32 +452,17 @@ void setupConfigPortal()
     wm.addParameter(&custom_mqtt_user);
     wm.addParameter(&custom_mqtt_pass);
 
-    savedSSID =
-        WiFi.SSID();
-
-    savedPassword =
-        WiFi.psk();
-
-    Serial.print(
-        "Saved SSID: "
-    );
-
-    Serial.println(
-        savedSSID
-    );
+    loadSavedWifiCredentials();
   
-    bool connected =
-        wm.autoConnect(
-           "ESP32_Config",
-           "admin123"
-        );
-
-    if(!connected)
+    if(savedSSID.length() > 0)
     {
-        Serial.println(
-            "Starting portal mode"
+        WiFi.begin(
+            savedSSID.c_str(),
+            savedPassword.c_str()
         );
-
+    }
+    else
+    {
         wm.setConfigPortalBlocking(false);
 
         wm.startConfigPortal(
@@ -458,7 +472,7 @@ void setupConfigPortal()
 
         portalRunning = true;
     }
-
+  
     mqttServer =
         String(custom_mqtt_server.getValue());
 
@@ -668,6 +682,7 @@ void wifiTask(void *pvParameters)
         if(portalRunning)
         {
             wm.process();
+            loadSavedWifiCredentials();  
         }
 
         if(WiFi.status() == WL_CONNECTED)
