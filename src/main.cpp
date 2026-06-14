@@ -19,7 +19,7 @@
 // --------------------------------------------------
 // RTOS Task Handles
 // --------------------------------------------------
-TaskHandle_t mqttTaskHandle = NULL;
+TaskHandle_t mqttTaskHandle   = NULL;
 TaskHandle_t sensorTaskHandle = NULL;
 TaskHandle_t otaTaskHandle    = NULL;
 TaskHandle_t wifiTaskHandle   = NULL;
@@ -32,6 +32,12 @@ SemaphoreHandle_t mqttMutex;
 unsigned long lastReconnectAttempt = 0;
 int           wifiFailureCount     = 0;
 bool          portalRunning        = false;
+
+// Cached credentials — populated at boot from flash,
+// reliable even after WiFi disconnects (WiFi.SSID()
+// returns empty once the link drops).
+String cachedSSID = "";
+String cachedPSK  = "";
 
 WiFiManager wm;
 
@@ -186,7 +192,7 @@ String createHMAC(String payload)
 }
 
 // --------------------------------------------------
-// AES-128-CBC encrypt → ivHex:base64(ciphertext)
+// AES-128-CBC encrypt -> ivHex:base64(ciphertext)
 // --------------------------------------------------
 void generateRandomIV(uint8_t *iv)
 {
@@ -259,7 +265,7 @@ void doOTA(String url)
     Serial.println(url);
 
     WiFiClientSecure otaClient;
-    otaClient.setInsecure();                         // relax TLS for OTA host
+    otaClient.setInsecure();
     httpUpdate.rebootOnUpdate(true);
     httpUpdate.setFollowRedirects(HTTPC_FORCE_FOLLOW_REDIRECTS);
 
@@ -324,22 +330,66 @@ void callback(char* topic, byte* payload, unsigned int length)
 }
 
 // --------------------------------------------------
+// loadCredentialsFromFlash
+//
+// Reads WiFi credentials from the ESP32 WiFi NVS
+// partition directly via esp_wifi_get_config().
+// This is the only reliable source once WiFi has
+// disconnected — WiFi.SSID() / WiFi.psk() go empty
+// after the link drops.
+// --------------------------------------------------
+void loadCredentialsFromFlash()
+{
+    wifi_config_t conf;
+    memset(&conf, 0, sizeof(conf));
+
+    if (esp_wifi_get_config(WIFI_IF_STA, &conf) == ESP_OK)
+    {
+        String ssid = String((char*)conf.sta.ssid);
+        String psk  = String((char*)conf.sta.password);
+
+        if (ssid.length() > 0)
+        {
+            cachedSSID = ssid;
+            cachedPSK  = psk;
+            Serial.print("Credentials loaded from flash. SSID: ");
+            Serial.println(cachedSSID);
+        }
+        else
+        {
+            Serial.println("No credentials stored in flash yet.");
+        }
+    }
+    else
+    {
+        Serial.println("esp_wifi_get_config failed.");
+    }
+}
+
+// --------------------------------------------------
 // setupConfigPortal
-// FIX: use autoConnect so saved credentials are used
-//      on boot without manual WiFi.begin() conflict.
-//      setSaveParamsCallback persists MQTT values when
-//      the user submits the portal form.
+//
+// Boot strategy:
+//   1. If flash has saved credentials, try them
+//      directly for up to 15 s (fast path).
+//   2. If that succeeds, continue normally.
+//   3. If it fails (router down at boot), start the
+//      NON-BLOCKING portal so setup() can finish and
+//      wifiTask can own all retry + portal logic.
+//   4. If no credentials are stored at all (first
+//      boot), run the BLOCKING portal until the user
+//      submits credentials — there is nothing else
+//      to do anyway.
 // --------------------------------------------------
 void setupConfigPortal()
 {
-    // Load previously saved MQTT config from NVS
+    // Load saved MQTT config from NVS
     prefs.begin("config", true);
     String savedServer = prefs.getString("mqtt_server", "");
     String savedUser   = prefs.getString("mqtt_user",   "");
     String savedPass   = prefs.getString("mqtt_pass",   "");
     prefs.end();
 
-    // Build WiFiManager custom parameters
     WiFiManagerParameter custom_mqtt_server(
         "server", "MQTT Server",   savedServer.c_str(), 100);
     WiFiManagerParameter custom_mqtt_user(
@@ -351,7 +401,8 @@ void setupConfigPortal()
     wm.addParameter(&custom_mqtt_user);
     wm.addParameter(&custom_mqtt_pass);
 
-    // FIX: persist MQTT params the moment the user hits Save in the portal
+    // Persist MQTT params and refresh credential cache when
+    // the user submits the portal form.
     wm.setSaveParamsCallback([&]() {
         String newServer = String(custom_mqtt_server.getValue());
         String newUser   = String(custom_mqtt_user.getValue());
@@ -368,35 +419,75 @@ void setupConfigPortal()
         mqttPass   = newPass;
 
         Serial.println("MQTT config saved from portal");
+
+        // Refresh cached WiFi creds — WiFiManager has just
+        // written the new SSID/PSK to flash. Give it a tick
+        // then re-read so wifiTask always has fresh values.
+        delay(200);
+        loadCredentialsFromFlash();
     });
 
-    // Optional: close the portal after 3 minutes if no one connects
-    wm.setConfigPortalTimeout(180);
+    // Read credentials that WiFiManager previously saved to flash.
+    // Do this BEFORE any WiFi.begin() call while the stack is idle
+    // so WiFi.SSID() is still populated.
+    WiFi.mode(WIFI_STA);
 
-    // FIX: autoConnect does everything:
-    //   • Saved credentials present → connects automatically (no portal)
-    //   • No saved credentials      → starts blocking portal
-    // This replaces the broken manual loadSavedWifiCredentials + WiFi.begin()
-    Serial.println("Starting WiFiManager autoConnect...");
-    bool connected = wm.autoConnect("ESP32_Config", "admin123");
+    // Give the WiFi stack a moment to initialise so
+    // esp_wifi_get_config returns valid data.
+    delay(100);
+    loadCredentialsFromFlash();
 
-    if (!connected)
+    if (cachedSSID.length() > 0)
     {
-        // Portal timed out or connection failed — restart and try again
-        Serial.println("WiFiManager failed to connect. Restarting...");
-        ESP.restart();
+        // ── Saved credentials exist: try them for up to 15 s ──────────
+        Serial.print("Boot: connecting to saved SSID: ");
+        Serial.println(cachedSSID);
+
+        WiFi.begin(cachedSSID.c_str(), cachedPSK.c_str());
+
+        unsigned long start = millis();
+        while (WiFi.status() != WL_CONNECTED && millis() - start < 15000)
+        {
+            Serial.print(".");
+            delay(500);
+        }
+        Serial.println();
+
+        if (WiFi.status() == WL_CONNECTED)
+        {
+            Serial.println("Boot WiFi connected successfully.");
+        }
+        else
+        {
+            // Router unreachable at boot — start non-blocking portal.
+            // wifiTask will keep retrying cachedSSID in the background.
+            Serial.println(
+                "Boot WiFi failed. Starting non-blocking portal..."
+            );
+            wm.setConfigPortalBlocking(false);
+            wm.startConfigPortal("ESP32_Config", "admin123");
+            portalRunning = true;
+        }
+    }
+    else
+    {
+        // ── First boot / credentials wiped: must block for user input ──
+        Serial.println(
+            "No saved credentials. Starting blocking portal..."
+        );
+        wm.autoConnect("ESP32_Config", "admin123");
+
+        // After autoConnect the new credentials are in flash; cache them.
+        loadCredentialsFromFlash();
     }
 
-    Serial.println("WiFi connected via WiFiManager");
-
-    // Read MQTT values — either freshly entered or still from NVS
+    // Read MQTT values — correct whether portal ran or not.
     mqttServer = String(custom_mqtt_server.getValue());
     mqttUser   = String(custom_mqtt_user.getValue());
     mqttPass   = String(custom_mqtt_pass.getValue());
 
-    // If NVS had values but portal wasn't shown, getValue() returns the
-    // default string we passed in (savedServer/User/Pass), which is correct.
-    Serial.print("MQTT Server: "); Serial.println(mqttServer);
+    Serial.print("MQTT Server: ");
+    Serial.println(mqttServer);
 }
 
 // --------------------------------------------------
@@ -470,7 +561,7 @@ void otaTask(void *pvParameters)
 }
 
 // --------------------------------------------------
-// RTOS Task: DHT11 sensor → encrypt → publish
+// RTOS Task: DHT11 sensor -> encrypt -> publish
 // --------------------------------------------------
 void sensorTask(void *pvParameters)
 {
@@ -491,9 +582,8 @@ void sensorTask(void *pvParameters)
             String payload;
             serializeJson(doc, payload);
 
-            // Add HMAC over the plain payload
-            String hmac    = createHMAC(payload);
-            doc["hmac"]    = hmac;
+            String hmac = createHMAC(payload);
+            doc["hmac"] = hmac;
             serializeJson(doc, payload);
 
             String encrypted = encryptAES(payload);
@@ -533,21 +623,24 @@ void sensorTask(void *pvParameters)
 // --------------------------------------------------
 // RTOS Task: WiFi watchdog & reconnect
 //
-// When the portal is running the task:
-//   1. Keeps calling wm.process() so the portal stays alive
-//   2. Every PORTAL_RETRY_INTERVAL_MS attempts WiFi.begin()
-//      with the credentials already saved in flash by
-//      WiFiManager — AP+STA mode handles both simultaneously
-//   3. Closes the portal automatically if either the
-//      background retry or a user submission succeeds
+// Uses cachedSSID / cachedPSK throughout — these are
+// populated at boot from flash and updated whenever
+// the portal saves new credentials, so they are
+// always valid regardless of WiFi link state.
+//
+// States:
+//   WL_CONNECTED   - healthy, poll every 10 s
+//   portalRunning  - serve portal + retry cached
+//                    creds every 10 s in background
+//   disconnected   - attempt reconnect; open portal
+//                    after 6 consecutive failures
 // --------------------------------------------------
-
-#define PORTAL_RETRY_INTERVAL_MS  10000   // retry saved creds every 10 s
+#define PORTAL_RETRY_INTERVAL_MS   10000  // background retry period
 #define PORTAL_PROCESS_INTERVAL_MS   100  // wm.process() poll interval
 
 void wifiTask(void *pvParameters)
 {
-    unsigned long lastPortalRetry = 0;  // tracks last background retry time
+    unsigned long lastPortalRetry = 0;
 
     while (true)
     {
@@ -562,69 +655,85 @@ void wifiTask(void *pvParameters)
                 wifiFailureCount = 0;
             }
             wifiFailureCount = 0;
-
-            vTaskDelay(pdMS_TO_TICKS(10000));   // healthy — check again in 10 s
+            vTaskDelay(pdMS_TO_TICKS(10000));
         }
 
-        // ── Portal running — serve portal + retry saved creds ────────────
+        // ── Portal running — serve portal + retry cached creds ───────────
         else if (portalRunning)
         {
             unsigned long now = millis();
 
-            // Background retry: attempt saved credentials periodically
             if (now - lastPortalRetry >= PORTAL_RETRY_INTERVAL_MS)
             {
                 lastPortalRetry = now;
 
-                String savedSSID = WiFi.SSID();   // credentials WiFiManager
-                String savedPSK  = WiFi.psk();    // stored in flash
-
-                if (savedSSID.length() > 0)
+                if (cachedSSID.length() > 0)
                 {
                     Serial.print(
-                        "[Portal] Retrying saved SSID in background: "
+                        "[Portal] Retrying cached SSID in background: "
                     );
-                    Serial.println(savedSSID);
+                    Serial.println(cachedSSID);
 
-                    // AP+STA mode: WiFi.begin() runs alongside the portal AP
-                    WiFi.begin(savedSSID.c_str(), savedPSK.c_str());
+                    // AP+STA: WiFi.begin() runs while portal AP stays up
+                    WiFi.begin(cachedSSID.c_str(), cachedPSK.c_str());
                 }
                 else
                 {
                     Serial.println(
-                        "[Portal] No saved SSID — waiting for user input"
+                        "[Portal] No cached credentials — waiting for "
+                        "user to submit portal form"
                     );
                 }
             }
 
-            // Keep portal alive between retries
+            // Check if the background retry just succeeded
+            if (WiFi.status() == WL_CONNECTED)
+            {
+                Serial.println(
+                    "[Portal] Background retry succeeded. "
+                    "Closing portal."
+                );
+                wm.stopConfigPortal();
+                portalRunning    = false;
+                wifiFailureCount = 0;
+            }
+
             wm.process();
             vTaskDelay(pdMS_TO_TICKS(PORTAL_PROCESS_INTERVAL_MS));
         }
 
-        // ── Disconnected, no portal — attempt normal reconnect ───────────
+        // ── Disconnected, no portal — normal reconnect ───────────────────
         else
         {
             Serial.println("WiFi lost. Attempting reconnect...");
 
-            WiFi.disconnect(false, false);
-            vTaskDelay(pdMS_TO_TICKS(1000));
-
-            // WiFi.reconnect() reuses credentials already in flash
-            WiFi.reconnect();
-
-            int retries = 0;
-            while (WiFi.status() != WL_CONNECTED && retries < 20)
+            if (cachedSSID.length() > 0)
             {
-                Serial.print(".");
+                WiFi.disconnect(false, false);
                 vTaskDelay(pdMS_TO_TICKS(500));
-                retries++;
+
+                Serial.print("Reconnecting to: ");
+                Serial.println(cachedSSID);
+
+                WiFi.begin(cachedSSID.c_str(), cachedPSK.c_str());
+
+                int retries = 0;
+                while (WiFi.status() != WL_CONNECTED && retries < 20)
+                {
+                    Serial.print(".");
+                    vTaskDelay(pdMS_TO_TICKS(500));
+                    retries++;
+                }
+                Serial.println();
             }
-            Serial.println();
+            else
+            {
+                Serial.println("No cached credentials to reconnect with.");
+            }
 
             if (WiFi.status() == WL_CONNECTED)
             {
-                Serial.println("WiFi reconnected");
+                Serial.println("WiFi reconnected.");
                 Serial.println(WiFi.localIP());
                 wifiFailureCount = 0;
             }
@@ -634,14 +743,15 @@ void wifiTask(void *pvParameters)
                 Serial.print("Reconnect failed. Count=");
                 Serial.println(wifiFailureCount);
 
-                // After 6 consecutive failures open the non-blocking portal
                 if (wifiFailureCount >= 6)
                 {
-                    Serial.println("Starting Config Portal...");
+                    Serial.println(
+                        "6 failures — starting non-blocking portal..."
+                    );
                     wm.setConfigPortalBlocking(false);
                     wm.startConfigPortal("ESP32_Config", "admin123");
                     portalRunning   = true;
-                    lastPortalRetry = 0;   // trigger first retry immediately
+                    lastPortalRetry = 0; // trigger immediate first retry
                 }
                 else
                 {
@@ -660,7 +770,6 @@ void setup()
     Serial.begin(115200);
     delay(3000);
 
-    // AES key must be ready before anything uses crypto
     Serial.println("Initialising AES key...");
     initializeAESKey();
 
@@ -671,36 +780,43 @@ void setup()
 
     dht.begin();
 
-    // FIX: setupConfigPortal() now blocks here until WiFi is connected
-    // (either via saved credentials automatically, or via portal entry).
-    // No separate WiFi wait loop needed below.
+    // setupConfigPortal() handles all boot WiFi logic:
+    //   - cached creds found -> try them, fall back to non-blocking portal
+    //   - no creds at all   -> blocking portal until user configures
     setupConfigPortal();
 
     Serial.print("Firmware Version: ");
     Serial.println(FW_VERSION);
 
-    // ArduinoOTA (LAN OTA)
+    // ArduinoOTA (LAN OTA) — only set up if connected
     ArduinoOTA.setHostname("ESP32-Sensor");
-    ArduinoOTA.onStart([]() { Serial.println("OTA Start"); });
-    ArduinoOTA.onEnd([]()   { Serial.println("\nOTA End"); });
-    ArduinoOTA.onError([](ota_error_t error) {
-        Serial.printf("OTA Error[%u]\n", error);
-    });
+    ArduinoOTA.onStart([]()                { Serial.println("OTA Start"); });
+    ArduinoOTA.onEnd([]()                  { Serial.println("\nOTA End"); });
+    ArduinoOTA.onError([](ota_error_t err) { Serial.printf("OTA Error[%u]\n", err); });
     ArduinoOTA.begin();
 
     Serial.println("OTA Ready");
     Serial.print("IP: ");
     Serial.println(WiFi.localIP());
 
-    // Sync time (IST = UTC+5:30 = 19800 s offset)
-    configTime(19800, 0, "pool.ntp.org", "time.nist.gov");
-    struct tm timeinfo;
-    while (!getLocalTime(&timeinfo))
+    // NTP — only meaningful when connected; wifiTask will
+    // reconnect if needed and MQTT will retry on its own.
+    if (WiFi.status() == WL_CONNECTED)
     {
-        Serial.println("Waiting for NTP...");
-        delay(1000);
+        configTime(19800, 0, "pool.ntp.org", "time.nist.gov");
+        struct tm timeinfo;
+        int ntpRetries = 0;
+        while (!getLocalTime(&timeinfo) && ntpRetries < 10)
+        {
+            Serial.println("Waiting for NTP...");
+            delay(1000);
+            ntpRetries++;
+        }
+        if (getLocalTime(&timeinfo))
+            Serial.println("Time synced");
+        else
+            Serial.println("NTP failed — will rely on task retries");
     }
-    Serial.println("Time synced");
 
     // TLS + MQTT
     secureClient.setCACert(ca_cert);
@@ -717,10 +833,14 @@ void setup()
     }
 
     // Launch RTOS tasks
-    xTaskCreatePinnedToCore(mqttTask,   "MQTT",   16384, NULL, 3, &mqttTaskHandle,   1);
-    xTaskCreatePinnedToCore(sensorTask, "Sensor",  6144, NULL, 2, &sensorTaskHandle,  1);
-    xTaskCreatePinnedToCore(otaTask,    "OTA",    16384, NULL, 1, &otaTaskHandle,     0);
-    xTaskCreatePinnedToCore(wifiTask,   "WiFi",    4096, NULL, 2, &wifiTaskHandle,    0);
+    xTaskCreatePinnedToCore(
+        mqttTask,   "MQTT",   16384, NULL, 3, &mqttTaskHandle,   1);
+    xTaskCreatePinnedToCore(
+        sensorTask, "Sensor",  6144, NULL, 2, &sensorTaskHandle,  1);
+    xTaskCreatePinnedToCore(
+        otaTask,    "OTA",    16384, NULL, 1, &otaTaskHandle,     0);
+    xTaskCreatePinnedToCore(
+        wifiTask,   "WiFi",    4096, NULL, 2, &wifiTaskHandle,    0);
 
     Serial.println("All RTOS tasks started");
 }
