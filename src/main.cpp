@@ -663,7 +663,16 @@ void wifiTask(void *pvParameters)
                 "WiFi lost. Reconnecting..."
             );
 
-            WiFi.reconnect();
+            WiFi.disconnect(
+                false,
+                false
+            );
+
+            vTaskDelay(
+                pdMS_TO_TICKS(1000)
+            );
+
+            WiFi.begin();
 
             int retries = 0;
 
@@ -676,12 +685,21 @@ void wifiTask(void *pvParameters)
                     wm.process();
                 }
 
+                Serial.print(".");
+
                 vTaskDelay(
                     pdMS_TO_TICKS(500)
                 );
 
                 retries++;
             }
+
+            Serial.println();
+
+            Serial.printf(
+                "WiFi Status = %d\n",
+                WiFi.status()
+            );
 
             if(WiFi.status() == WL_CONNECTED)
             {
@@ -754,8 +772,14 @@ void setup()
 
   setupConfigPortal();
 
-  while(WiFi.status() != WL_CONNECTED)
- {
+  unsigned long start =
+      millis();
+
+  while(
+      WiFi.status() != WL_CONNECTED &&
+      millis() - start < 30000
+  )
+  {
       Serial.println(
           "Waiting for WiFi..."
       );
