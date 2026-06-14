@@ -532,45 +532,90 @@ void sensorTask(void *pvParameters)
 
 // --------------------------------------------------
 // RTOS Task: WiFi watchdog & reconnect
-// FIX: no longer relies on loadSavedWifiCredentials().
-//      Uses WiFi.begin() with credentials from
-//      WiFiManager's internal storage (flash), which
-//      are always available after the first portal run.
+//
+// When the portal is running the task:
+//   1. Keeps calling wm.process() so the portal stays alive
+//   2. Every PORTAL_RETRY_INTERVAL_MS attempts WiFi.begin()
+//      with the credentials already saved in flash by
+//      WiFiManager — AP+STA mode handles both simultaneously
+//   3. Closes the portal automatically if either the
+//      background retry or a user submission succeeds
 // --------------------------------------------------
+
+#define PORTAL_RETRY_INTERVAL_MS  10000   // retry saved creds every 10 s
+#define PORTAL_PROCESS_INTERVAL_MS   100  // wm.process() poll interval
+
 void wifiTask(void *pvParameters)
 {
+    unsigned long lastPortalRetry = 0;  // tracks last background retry time
+
     while (true)
     {
+        // ── Connected ────────────────────────────────────────────────────
         if (WiFi.status() == WL_CONNECTED)
         {
-            // Connection healthy — reset failure counter
             if (portalRunning)
             {
-                Serial.println("WiFi restored. Closing portal.");
+                Serial.println("WiFi connected. Closing config portal.");
                 wm.stopConfigPortal();
-                portalRunning = false;
+                portalRunning    = false;
+                wifiFailureCount = 0;
             }
             wifiFailureCount = 0;
+
+            vTaskDelay(pdMS_TO_TICKS(10000));   // healthy — check again in 10 s
         }
+
+        // ── Portal running — serve portal + retry saved creds ────────────
+        else if (portalRunning)
+        {
+            unsigned long now = millis();
+
+            // Background retry: attempt saved credentials periodically
+            if (now - lastPortalRetry >= PORTAL_RETRY_INTERVAL_MS)
+            {
+                lastPortalRetry = now;
+
+                String savedSSID = WiFi.SSID();   // credentials WiFiManager
+                String savedPSK  = WiFi.psk();    // stored in flash
+
+                if (savedSSID.length() > 0)
+                {
+                    Serial.print(
+                        "[Portal] Retrying saved SSID in background: "
+                    );
+                    Serial.println(savedSSID);
+
+                    // AP+STA mode: WiFi.begin() runs alongside the portal AP
+                    WiFi.begin(savedSSID.c_str(), savedPSK.c_str());
+                }
+                else
+                {
+                    Serial.println(
+                        "[Portal] No saved SSID — waiting for user input"
+                    );
+                }
+            }
+
+            // Keep portal alive between retries
+            wm.process();
+            vTaskDelay(pdMS_TO_TICKS(PORTAL_PROCESS_INTERVAL_MS));
+        }
+
+        // ── Disconnected, no portal — attempt normal reconnect ───────────
         else
         {
             Serial.println("WiFi lost. Attempting reconnect...");
 
-            // Let the WiFi stack settle before reconnecting
             WiFi.disconnect(false, false);
             vTaskDelay(pdMS_TO_TICKS(1000));
 
-            // FIX: use wm.autoConnect() style reconnect so WiFiManager's
-            // stored credentials (saved to flash by the portal) are used.
-            // WiFi.reconnect() achieves the same without re-running setup.
+            // WiFi.reconnect() reuses credentials already in flash
             WiFi.reconnect();
 
             int retries = 0;
             while (WiFi.status() != WL_CONNECTED && retries < 20)
             {
-                if (portalRunning)
-                    wm.process();
-
                 Serial.print(".");
                 vTaskDelay(pdMS_TO_TICKS(500));
                 retries++;
@@ -589,29 +634,20 @@ void wifiTask(void *pvParameters)
                 Serial.print("Reconnect failed. Count=");
                 Serial.println(wifiFailureCount);
 
-                // After 6 consecutive failures, open the config portal
-                if (wifiFailureCount >= 6 && !portalRunning)
+                // After 6 consecutive failures open the non-blocking portal
+                if (wifiFailureCount >= 6)
                 {
                     Serial.println("Starting Config Portal...");
                     wm.setConfigPortalBlocking(false);
                     wm.startConfigPortal("ESP32_Config", "admin123");
-                    portalRunning = true;
+                    portalRunning   = true;
+                    lastPortalRetry = 0;   // trigger first retry immediately
+                }
+                else
+                {
+                    vTaskDelay(pdMS_TO_TICKS(10000));
                 }
             }
-        }
-
-        // If portal is running, keep processing it between checks
-        if (portalRunning)
-        {
-            for (int i = 0; i < 100; i++)   // ~10 s of portal processing
-            {
-                wm.process();
-                vTaskDelay(pdMS_TO_TICKS(100));
-            }
-        }
-        else
-        {
-            vTaskDelay(pdMS_TO_TICKS(10000));
         }
     }
 }
