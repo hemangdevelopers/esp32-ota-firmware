@@ -29,6 +29,9 @@ int wifiFailureCount = 0;
 bool portalRunning = false;
 WiFiManager wm;
 
+String savedSSID = "";
+String savedPassword = "";
+
 // ---------------- DHT11 ----------------
 #define DHTPIN 4
 #define DHTTYPE DHT11
@@ -419,6 +422,20 @@ void setupConfigPortal()
     wm.addParameter(&custom_mqtt_server);
     wm.addParameter(&custom_mqtt_user);
     wm.addParameter(&custom_mqtt_pass);
+
+    savedSSID =
+        WiFi.SSID();
+
+    savedPassword =
+        WiFi.psk();
+
+    Serial.print(
+        "Saved SSID: "
+    );
+
+    Serial.println(
+        savedSSID
+    );
   
     bool connected =
         wm.autoConnect(
@@ -686,8 +703,22 @@ void wifiTask(void *pvParameters)
             vTaskDelay(
                 pdMS_TO_TICKS(1000)
             );
+  
+            Serial.print(
+                "Reconnecting to: "
+            );
 
-            WiFi.begin();
+            Serial.println(
+                savedSSID
+            );
+          
+            if(savedSSID.length() > 0)
+            {
+                WiFi.begin(
+                    savedSSID.c_str(),
+                    savedPassword.c_str()
+                );
+            }
           
             int retries = 0;
 
