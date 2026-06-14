@@ -428,7 +428,18 @@ void setupConfigPortal()
 
     if(!connected)
     {
-        return;
+        Serial.println(
+            "Starting portal mode"
+        );
+
+        wm.setConfigPortalBlocking(false);
+
+        wm.startConfigPortal(
+            "ESP32_Config",
+            "admin123"
+        );
+
+        portalRunning = true;
     }
 
     mqttServer =
@@ -663,8 +674,12 @@ void wifiTask(void *pvParameters)
                 "WiFi lost. Reconnecting..."
             );
 
+            WiFi.mode(
+                WIFI_AP_STA
+            );
+
             WiFi.disconnect(
-                false,
+                true,
                 false
             );
 
@@ -673,7 +688,7 @@ void wifiTask(void *pvParameters)
             );
 
             WiFi.begin();
-
+          
             int retries = 0;
 
             while(
@@ -703,6 +718,14 @@ void wifiTask(void *pvParameters)
 
             if(WiFi.status() == WL_CONNECTED)
             {
+                Serial.println(
+                    "WiFi connected"
+                );
+
+                Serial.println(
+                    WiFi.localIP()
+                );
+              
                 wifiFailureCount = 0;
             }
             else
